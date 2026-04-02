@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest } from "next/server";
 import * as cheerio from "cheerio";
 
@@ -43,7 +43,7 @@ function mergeCookies(existing: string[], incoming: string[]): string[] {
 export async function POST(req: NextRequest) {
   const { citationNumber, reason, email, phone } = await req.json();
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return new Response(
       `data: ${JSON.stringify({ type: "error", message: "Server configuration error: missing API key" })}\n\n`,
@@ -51,7 +51,8 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const anthropic = new Anthropic({ apiKey });
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -118,44 +119,26 @@ export async function POST(req: NextRequest) {
 
           const captchaBuffer = await captchaRes.arrayBuffer();
           const captchaBase64 = Buffer.from(captchaBuffer).toString("base64");
-          const captchaMediaType =
+          const captchaMimeType =
             captchaRes.headers.get("content-type") || "image/jpeg";
 
-          // Solve with Claude Vision
-          const solveRes = await anthropic.messages.create({
-            model: "claude-sonnet-4-20250514",
-            max_tokens: 100,
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "image",
-                    source: {
-                      type: "base64",
-                      media_type: captchaMediaType as
-                        | "image/jpeg"
-                        | "image/png"
-                        | "image/gif"
-                        | "image/webp",
-                      data: captchaBase64,
-                    },
-                  },
-                  {
-                    type: "text",
-                    text: "Read the text in this CAPTCHA image. Return ONLY the characters you see, nothing else. No quotes, no explanation, just the exact characters.",
-                  },
-                ],
+          // Solve with Gemini Vision
+          const solveResult = await model.generateContent([
+            {
+              inlineData: {
+                mimeType: captchaMimeType,
+                data: captchaBase64,
               },
-            ],
-          });
+            },
+            {
+              text: "Read the text in this CAPTCHA image. Return ONLY the characters you see, nothing else. No quotes, no explanation, just the exact characters.",
+            },
+          ]);
 
-          const solvedText = solveRes.content.find((c) => c.type === "text");
-          if (solvedText && solvedText.type === "text") {
-            captchaText = solvedText.text.trim();
-            if (captchaText.length >= 4 && captchaText.length <= 8) {
-              captchaSolved = true;
-            }
+          const solvedText = solveResult.response.text().trim();
+          if (solvedText.length >= 4 && solvedText.length <= 8) {
+            captchaText = solvedText;
+            captchaSolved = true;
           }
         }
 
@@ -243,7 +226,6 @@ export async function POST(req: NextRequest) {
         // Step 3: Enter dispute details
         sendEvent(controller, { type: "step", stepIndex: 3 });
 
-        // Parse step 2 response for the next form
         const step2Form = $step2("form");
         if (step2Form.length > 0) {
           const step2Action =
@@ -252,7 +234,6 @@ export async function POST(req: NextRequest) {
             ? step2Action
             : `${SFMTA_BASE}${step2Action}`;
 
-          // Collect hidden fields
           const step2FormData = new URLSearchParams();
           step2Form.find('input[type="hidden"]').each((_, el) => {
             const name = $step2(el).attr("name");
@@ -260,16 +241,14 @@ export async function POST(req: NextRequest) {
             if (name) step2FormData.append(name, value);
           });
 
-          // Look for dispute reason fields and fill them
           step2Form.find("textarea").each((_, el) => {
             const name = $step2(el).attr("name");
             if (name) step2FormData.append(name, reason);
           });
 
-          step2Form.find('select').each((_, el) => {
+          step2Form.find("select").each((_, el) => {
             const name = $step2(el).attr("name");
             if (name) {
-              // Select the first non-empty option or "Other"
               const options = $step2(el).find("option");
               let selectedValue = "";
               options.each((_, opt) => {
@@ -289,7 +268,6 @@ export async function POST(req: NextRequest) {
             }
           });
 
-          // Fill text inputs with appropriate data
           step2Form
             .find('input[type="text"], input[type="email"], input[type="tel"]')
             .each((_, el) => {
@@ -307,7 +285,6 @@ export async function POST(req: NextRequest) {
               }
             });
 
-          // Find and click submit/next button
           const submitBtn = step2Form.find(
             'input[type="submit"], button[type="submit"]'
           );
@@ -317,7 +294,6 @@ export async function POST(req: NextRequest) {
             if (btnName) step2FormData.append(btnName, btnValue);
           }
 
-          // Submit step 2
           const step3Res = await fetch(fullAction, {
             method: "POST",
             headers: {
@@ -356,7 +332,6 @@ export async function POST(req: NextRequest) {
             step3Html = await step3Res.text();
           }
 
-          // Parse step 3 and continue filling forms
           const $step3 = cheerio.load(step3Html);
           const step3Form = $step3("form");
 
@@ -369,14 +344,12 @@ export async function POST(req: NextRequest) {
 
             const step3FormData = new URLSearchParams();
 
-            // Collect hidden fields
             step3Form.find('input[type="hidden"]').each((_, el) => {
               const name = $step3(el).attr("name");
               const value = $step3(el).attr("value") || "";
               if (name) step3FormData.append(name, value);
             });
 
-            // Fill all text-like fields
             step3Form
               .find('input[type="text"], input[type="email"], input[type="tel"]')
               .each((_, el) => {
@@ -414,7 +387,6 @@ export async function POST(req: NextRequest) {
               }
             });
 
-            // Submit button
             const submitBtn3 = step3Form.find(
               'input[type="submit"], button[type="submit"]'
             );
@@ -424,7 +396,6 @@ export async function POST(req: NextRequest) {
               if (btnName) step3FormData.append(btnName, btnValue);
             }
 
-            // Submit step 3
             const step4Res = await fetch(fullStep3Action, {
               method: "POST",
               headers: {
@@ -463,7 +434,6 @@ export async function POST(req: NextRequest) {
               step4Html = await step4Res.text();
             }
 
-            // Continue submitting remaining forms (steps 4-6)
             const $step4 = cheerio.load(step4Html);
             const step4Form = $step4("form");
 
@@ -503,7 +473,6 @@ export async function POST(req: NextRequest) {
                 if (name) step4FormData.append(name, reason);
               });
 
-              // Check any checkboxes (like agreement checkboxes)
               step4Form.find('input[type="checkbox"]').each((_, el) => {
                 const name = $step4(el).attr("name");
                 const value = $step4(el).attr("value") || "on";

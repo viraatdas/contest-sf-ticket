@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
@@ -9,7 +9,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No image provided" }, { status: 400 });
     }
 
-    const apiKey = process.env.ANTHROPIC_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
         { error: "Server configuration error: missing API key" },
@@ -17,7 +17,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const anthropic = new Anthropic({ apiKey });
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     // Extract the base64 data and media type from the data URL
     const match = image.match(/^data:(image\/\w+);base64,(.+)$/);
@@ -28,31 +29,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const mediaType = match[1] as
-      | "image/jpeg"
-      | "image/png"
-      | "image/gif"
-      | "image/webp";
+    const mimeType = match[1];
     const base64Data = match[2];
 
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: mediaType,
-                data: base64Data,
-              },
-            },
-            {
-              type: "text",
-              text: `Analyze this San Francisco parking ticket image. Extract the following information and return it as JSON only (no markdown, no explanation):
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          mimeType,
+          data: base64Data,
+        },
+      },
+      {
+        text: `Analyze this San Francisco parking ticket image. Extract the following information and return it as JSON only (no markdown, no explanation, no code fences):
 
 {
   "citationNumber": "the citation/ticket number",
@@ -64,26 +52,16 @@ export async function POST(req: NextRequest) {
 }
 
 If any field is not visible or readable, use an empty string for that field. Return ONLY the JSON object.`,
-            },
-          ],
-        },
-      ],
-    });
+      },
+    ]);
 
-    const textContent = response.content.find((c) => c.type === "text");
-    if (!textContent || textContent.type !== "text") {
-      return NextResponse.json(
-        { error: "Failed to analyze image" },
-        { status: 500 }
-      );
-    }
+    const responseText = result.response.text();
 
     try {
-      const parsed = JSON.parse(textContent.text);
+      const parsed = JSON.parse(responseText);
       return NextResponse.json(parsed);
     } catch {
-      // Try to extract JSON from the response
-      const jsonMatch = textContent.text.match(/\{[\s\S]*\}/);
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
         return NextResponse.json(parsed);
